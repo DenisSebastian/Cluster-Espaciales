@@ -1,0 +1,940 @@
+---
+title: "Tarea 1: Cluster Espaciales"
+subtitle: "Métodos de aprendizaje de máquinas en Data Science"
+format: 
+  html:
+    toc: true
+    html-math-method: katex
+    css: styles/style.css
+editor: source
+author: 
+  - "Denis Berroeta G."
+  - "Leonardo Rojas K."
+date: "14 Septiembre 2022"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,  warning=FALSE, message=FALSE, fig.align = 'center')
+options(scipen = 999)
+
+suppressPackageStartupMessages(library(dplyr))# Maipulación de Datos
+suppressPackageStartupMessages(library(sf))#  tratamiento de datos espaciales
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(plotly))
+suppressPackageStartupMessages(library(mapview))
+
+library("RColorBrewer")
+source("R/fns.R")
+```
+
+## Enunciado General
+
+El territorio de Chile esta subdividido en unidades administrativas, como regiones, provincias y comunas. La definición de estas unidades actuales obedece a diversos motivos históricos, políticos y circunstanciales, por lo que no existe homogeneidad entre ellas y existen comunas de diversos tamaños, poblaciones y condiciones de vida. La Subsecretaría de Desarrollo Regional y Administrativo de Chile ha decidido que para optimizar el diseño y ejecución de políticas públicas necesitan crear unidades administrativas que tengan un mayor grado de homogeneidad interna, también conocido como cohesión, y que estas regiones estén cohesionadas también en el espacio.
+
+Para estos efectos, la SUBDERE lo ha contratado a usted como consultor para que diseñe un algoritmo de clusterización que permita crear regiones en el territorio que cumplan con estas características. Para cumplir esto, se le otorgará una base de datos de todas las manzanas de la comuna de Las Condes (\~1.600), donde cada manzana contiene 39 atributos que reflejan diferentes dimensiones demográficas y de condiciones de vida, según lo reportado en el censo 2017 y lo calculado por la plataforma de [Bienestar Humano Territorial](https://ibt.uai.asimov.cl).
+
+El objetivo principal de este encargo es crear un programa computacional que permita crear clústers de manzanas que sean similares entre sí para reemplazar a los 13 cuadrantes actuales.
+
+## Análisis Descriptivo de Datos
+
+A continuación se procede a realizar un proceso de análisis desciptivo general de los datos a modo de entender su distribución y relaciones entre ellas.
+
+```{r}
+pacman::p_load(dplyr, purrr, ggplot2, GGally, tidyr, sf,
+               factoextra, ggdendro, cluster,plotly, paletteer,
+               patchwork, umap, MASS)
+
+options(readr.show_col_types = FALSE)
+set.seed(42)
+theme_set(theme_bw())
+create_graphs = TRUE
+
+```
+
+### Lectura de Datos
+
+```{r}
+df <- read.csv("data/datos_t1_centroides.csv") %>% 
+  dplyr::select(-1)%>% 
+  janitor::clean_names()
+# glimpse(df)
+```
+
+La base de datos llamada `df` tiene `r nrow(df)` registros correspondientes a centroides de manzanas censales de la comuan de Condes, cada uno de estas manzanas manatiene `r ncol(df)` atributos (columnas) que corresponden variables de identificación, valores de indicadores de Bienestar Territorial (IBT), características sociodemográficas y coordenadas espaciales ([UTM 19S](https://epsg.io/32719)), como a continuación se detalla:
+
+```{r echo=FALSE}
+cols <- colnames(df)
+
+id_cols <- cols[1:5]
+val_cols <- cols[6:28]
+car_cols <- cols[29:38]
+coords_cols <- cols[39:40]
+```
+
+
+- **Variables de Identificación**: *`r id_cols`*
+- **Valores de Indicadores de Bienestar Territorial**: *`r val_cols`*
+- **Variables de sociodemográficas**: *`r car_cols`*
+- **Coordenadas **: *`r coords_cols`*
+
+
+Para visualizar espacialmente la distribución estas manzanas se procede a generar un mapa, cuyo color de cada centroide (punto) corresponde al valor del indicador de Bienestar Territorial (ibt). 
+
+```{r}
+# trasformación de dataframe a Simple Feature (objeto espacial en R)
+sf_ibt <- df %>% 
+  st_as_sf(coords = c("x", "y"), crs = 32719) %>% 
+  mutate(zona_m = substr(zona, 9, nchar(zona)))
+
+mapview(sf_ibt, zcol="ibt", cex = 3)
+```
+
+
+
+### Distribución Variables de Identificación
+
+Como se mencionó las variables de identificación (`r id_cols`) tiene como fin identificar cada una de las manzanas en un contexto de otra uninidad adminustrativa mayor, como lo es Zona Censal (`zona`) y comuna a través de su código (`cod_com`). De estas las únicas presentar variabiliad y aportarn información es la Zona Censal y la identificación de manzana (`id_manz`). Se procede a visualizar un gráfico que representa la cantidad de manzanas por zona censal.
+
+::: panel-tabset
+## zonas
+
+Indicador de Bienestar Territorial
+
+```{r echo=FALSE}
+
+zonas <-  df %>% 
+  group_by(zona) %>% 
+  summarise(Cantidad = n()) %>% 
+  mutate(zona = substr(zona, 8, nchar(zona)))
+
+fig <- plot_ly(data = zonas, y = ~Cantidad, x=~zona, color = ~zona,
+               type = "bar") %>% 
+  layout(yaxis = list(title = "Cantidad de Manzanas"),
+         legend=list(title=list(text='<b> zonas</b>')))
+
+fig
+```
+:::
+
+### Distribución Variables Sociodemográficas
+
+::: panel-tabset
+## Personas
+
+Personas por Manzana
+
+```{r echo=FALSE}
+mz_dataset <-  df %>% 
+  mutate(ID_MANZ = substr(id_manz, 11, nchar(id_manz))) %>% 
+  mutate(zona = substr(zona, 9, nchar(zona)))
+
+fig <- plot_ly(data = mz_dataset, y = ~personas, color = ~zona,
+                type = "box") %>% 
+  layout(yaxis = list(title = "Cantidad de Personas"),
+         legend=list(title=list(text='<b> zonas</b>')))
+fig
+```
+
+## Viviendas
+
+Viviendas por Manzana
+
+```{r echo=FALSE}
+fig <- plot_ly(data = mz_dataset, y = ~total_v,  color = ~zona,
+               type = "box") %>% 
+  layout(yaxis = list(title = "Viviendas"),
+         legend=list(title=list(text='<b> zonas</b>')))
+fig
+```
+
+## Hogares
+
+Hogares por Manzana
+
+```{r echo=FALSE}
+fig <- plot_ly(data = mz_dataset, y = ~hog_n, color = ~zona,
+                type = "box") %>% 
+  layout(yaxis = list(title = "Hogares por Manzana"),
+         legend=list(title=list(text='<b> zonas</b>')))
+fig
+```
+
+## Pob. de 0 a 5
+
+Población de 0 a 5 años
+
+```{r echo=FALSE}
+fig <- plot_ly(data = mz_dataset, y = ~e0a5,  color = ~zona,
+                type = "box") %>% 
+  layout(yaxis = list(title = "Población de 0 a 5 años"),
+         legend=list(title=list(text='<b> zonas</b>')))
+fig
+```
+
+## Pob. de 6 a 14
+
+Población de 6 a 14 años
+
+```{r echo=FALSE}
+fig <- plot_ly(data = mz_dataset, y = ~e6a14,  color = ~zona,
+               type = "box") %>% 
+  layout(yaxis = list(title = "Población de 6 a 14 años"),
+         legend=list(title=list(text='<b> zonas</b>')))
+fig
+```
+
+## Pob. de 4 a 18
+
+Población de 4 a 18 años
+
+```{r echo=FALSE}
+fig <- plot_ly(data = mz_dataset, y = ~e4a18, color = ~zona,
+               type = "box") %>% 
+  layout(yaxis = list(title = "Población de 4 a 18 años"),
+         legend=list(title=list(text='<b> zonas</b>')))
+fig
+```
+
+## Pob. de 0 a 18
+
+Población de 0 a 18 años por zona
+
+```{r echo=FALSE}
+fig <- plot_ly(data = mz_dataset, y = ~e0a18,  color = ~zona,
+               type = "box") %>% 
+  layout(yaxis = list(title = "Población de 0 a 18 años"),
+         legend=list(title=list(text='<b> zonas</b>')))
+fig
+```
+
+## Pob. de 15 a 24
+
+Población de 15 a 24 años por zona
+
+```{r echo=FALSE}
+fig <- plot_ly(data = mz_dataset, y = ~e15a24,  color = ~zona,
+               type = "box") %>% 
+  layout(yaxis = list(title = "Población de 15 a 24 años"),
+         legend=list(title=list(text='<b> zonas</b>')))
+fig
+```
+
+## Pob. de 65 y más
+
+Población de 65 y más años por zona
+
+```{r echo=FALSE}
+fig <- plot_ly(data = mz_dataset, y = ~e65ymas,  color = ~zona,
+               type = "box") %>% 
+  layout(yaxis = list(title = "Población de 65 y más"),
+         legend=list(title=list(text='<b> zonas</b>')))
+fig
+```
+:::
+
+### Distribución indicadores {#sec-DistInd}
+
+![](imagenes/ibt_logo.png){width=40%}
+
+::: panel-tabset
+## IBT
+
+Indicador de Bienestar Territorial
+
+```{r echo=FALSE}
+fig <- plot_ly(data = df, y = ~ibt, type = "box",
+               boxpoints = "all", jitter = 0.1, pointpos = -1.8)
+
+fig
+```
+
+## Dimensiones
+
+Dimensiones
+
+```{r echo=FALSE}
+dims <- df %>% 
+  dplyr::select(starts_with("dim_")) %>% 
+  pivot_longer(names_to = "dimension", cols = starts_with("dim_"))
+
+fig <- plot_ly(dims, y = ~value, color = ~dimension, type = "box")
+
+fig
+```
+
+## Ind. Accesesibilidad
+
+Indicadores de Accesibilidad
+
+```{r echo=FALSE}
+acc <- df %>% 
+  dplyr::select(icul, idep, isal, ise, iser) %>% 
+  pivot_longer(names_to = "ind_acc", cols = names(.))
+fig <- plot_ly(acc, y = ~value, color = ~ind_acc, type = "box")
+
+fig
+```
+
+## Ind. Accesesibilidad: IAV
+
+Indicador de Áreas Verdes (Aparte la escala difiere enormente a los demás dimensiones)
+
+```{r echo=FALSE}
+iav <- df %>% 
+  dplyr::select(iav) %>% 
+  pivot_longer(names_to = "iav", cols = names(.))
+fig <- plot_ly(iav, y = ~value, color = ~iav, type = "box")
+
+fig
+```
+## Ind. Seguridad
+
+Indicadores de Accesibilidad
+
+```{r echo=FALSE}
+seg <- df %>% 
+  dplyr::select(igpe, igpr, ilpe, ilpr) %>% 
+  pivot_longer(names_to = "ind_seg", cols = names(.))
+fig <- plot_ly(seg, y = ~value, color = ~ind_seg, type = "box")
+
+fig
+```
+
+## Ind. Ambiental
+
+Indicadores Ambientales
+
+```{r echo=FALSE}
+amb <- df %>% 
+  dplyr::select(icv, iata) %>% 
+  pivot_longer(names_to = "ind_amb", cols = names(.))
+fig <- plot_ly(amb, y = ~value, color = ~ind_amb, type = "box")
+
+fig
+```
+
+## Ind. Sociecómicos
+
+Indicadores Socioeconómicos
+
+```{r echo=FALSE}
+soc <- df %>% 
+  dplyr::select(ivi, isv, irh, iem, ipj) %>% 
+  pivot_longer(names_to = "ind_soc", cols = names(.))
+fig <- plot_ly(soc, y = ~value, color = ~ind_soc, type = "box")
+
+fig
+```
+
+
+## Ind. Sociecómicos: EJH
+
+Escolaridad Jefe de Hogar (se hace aparte, mantiene otra escala)
+
+```{r echo=FALSE}
+iej <- df %>% 
+  dplyr::select(iej) %>% 
+  pivot_longer(names_to = "iej", cols = names(.))
+fig <- plot_ly(iej, y = ~value, color = ~iej, type = "box")
+
+fig
+```
+:::
+
+
+
+
+## Limpieza de Datos y Selección
+
+En esta sección se trabaja sobre el *espacio de features* de los datos, revisando sus distribuciones y a partir de esto tomando decisiones metodológicas respecto del tratamiento de datos perdidos, posibles transformaciones de variables y reducción de dimensionalidad.
+
+En esta sección revisamos la distribución univariada de cada variable de indicadores y algunas relaciones entre estas, se llevan a cabo transformaciones de variables.
+
+```{r}
+# tipo de variables (identificador, valores y caracteristicas)
+cols <- colnames(df)
+
+id_cols <- cols[1:5]
+val_cols <- cols[6:28]
+car_cols <- cols[29:38]
+
+```
+
+### Manejo de Datos Perdidos
+
+En la base podemos encontrar información faltante en ciertas variables, en particular:
+
+```{r}
+map_df(df, ~ sum(is.na(.x))) %>% keep(~.x>0)
+```
+
+Las variables que presentan información perdida se relacionan a indicadores que calculan accesibilidad a servicios para la población o información relacionada a viviendas y personas. Por lo que al revisar cómo se comportan estas observaciones tenemos bajos niveles de población, muy cercano a cero:
+
+```{r}
+NA_rows <- rowSums(is.na(df))>0
+my_summarise(filter(df, NA_rows), car_cols)
+
+```
+
+Es por esto que **podemos descartar estas observaciones del análisis**. La razón de esta decisión viene del objetivo de análisis, de encontrar unidades homogéneas en el espacio de variables y cohesionadas en el espacio geográfico. Por ahora podemos omitirlas del análisis, sin ensuciar el espacio de variables, y luego de detectar los clusters homogéneos pueden asignarse mediante cercanía a estos grupos.
+
+```{r}
+# omitir NA del analisis
+df_na <- na.omit(df)
+```
+
+### Transformación de Variables
+
+Al revisar la distribución de los indicadores (@sec-DistInd) encontramos que algunas variables tienen patrones evidentemente sesgados a valores altos o bajos (isv, o ivi vs icv) además de que existen diferencias en las unidades de medida, las cuales son todas positivas. A partir de esto **se aplicarán transforamciones logarítmicas** buscando suavizar las distribuciones y asemejarlas más a una campana normal.
+
+
+
+Así mismo las variables de caracterización muestran un sesgo a valores bajos, por lo que **también se le aplicarán transforamciones logarítmicas**.
+
+
+Aplicamos una transformación logarítmica a las variables más sesgadas:
+
+```{r}
+log_trans <- function(x, ep = 1) log(x+ep) 
+
+log_vars <- c("icv", "idep", "iej", "iem", "igpe", "ilpr", "ipj", 
+              "isal", "ise", "isv", "ivi", "iser")
+
+log_vars <- c(log_vars, car_cols)
+
+df_trans <- df_na
+
+df_trans <- df_trans %>% 
+  mutate(across(all_of(log_vars), log_trans))
+```
+
+
+
+### Distribución indicadores Transformadas {#sec-DistInd-transf}
+
+::: panel-tabset
+## IBT
+
+Indicador de Bienestar Territorial
+
+```{r echo=FALSE}
+fig <- plot_ly(data = df_trans, y = ~ibt, type = "box",
+               boxpoints = "all", jitter = 0.1, pointpos = -1.8)
+
+fig
+```
+
+## Dimensiones
+
+Dimensiones
+
+```{r echo=FALSE}
+dims <- df_trans %>% 
+  dplyr::select(starts_with("dim_")) %>% 
+  pivot_longer(names_to = "dimension", cols = starts_with("dim_"))
+
+fig <- plot_ly(dims, y = ~value, color = ~dimension, type = "box")
+
+fig
+```
+
+## Ind. Accesesibilidad
+
+Indicadores de Accesibilidad
+
+```{r echo=FALSE}
+acc <- df_trans %>% 
+  dplyr::select(icul, idep, isal, ise, iser) %>% 
+  pivot_longer(names_to = "ind_acc", cols = names(.))
+fig <- plot_ly(acc, y = ~value, color = ~ind_acc, type = "box")
+
+fig
+```
+
+## Ind. Accesesibilidad: IAV
+
+Indicadore de Áreas Verdes (Aparte ya que esta en otra escala)
+
+```{r echo=FALSE}
+iav <- df_trans %>% 
+  dplyr::select(iav) %>% 
+  pivot_longer(names_to = "iav", cols = names(.))
+fig <- plot_ly(iav, y = ~value, color = ~iav, type = "box")
+
+fig
+```
+
+
+
+## Ind. Seguridad
+
+Indicadores de Accesibilidad
+
+```{r echo=FALSE}
+seg <- df_trans %>% 
+  dplyr::select(igpe, igpr, ilpe, ilpr) %>% 
+  pivot_longer(names_to = "ind_seg", cols = names(.))
+fig <- plot_ly(seg, y = ~value, color = ~ind_seg, type = "box")
+
+fig
+```
+
+## Ind. Ambiental
+
+Indicadores Ambientales
+
+```{r echo=FALSE}
+amb <- df_trans %>% 
+  dplyr::select(icv, iata) %>% 
+  pivot_longer(names_to = "ind_amb", cols = names(.))
+fig <- plot_ly(amb, y = ~value, color = ~ind_amb, type = "box")
+
+fig
+```
+
+## Ind. Sociecómicos
+
+Indicadores Socioeconómicos
+
+```{r echo=FALSE}
+soc <- df_trans %>% 
+  dplyr::select(ivi, isv, irh, iem, ipj) %>% 
+  pivot_longer(names_to = "ind_soc", cols = names(.))
+fig <- plot_ly(soc, y = ~value, color = ~ind_soc, type = "box")
+
+fig
+```
+
+
+## Ind. Sociecómicos: EJH
+
+Escolaridad Jefe de Hogar (se hace aparte, mantiene otra escala)
+
+```{r echo=FALSE}
+iej <- df_trans %>% 
+  dplyr::select(iej) %>% 
+  pivot_longer(names_to = "iej", cols = names(.))
+fig <- plot_ly(iej, y = ~value, color = ~iej, type = "box")
+
+fig
+```
+:::
+
+
+
+
+### Estandarización y Outliers
+
+Luego, aplicaremos una estandarización para que los valores estén centrados en el promedio y que cada unidad represente una desviación estándar:
+
+
+```{r}
+ # seleccion de variables
+df_coords <- df_trans %>% dplyr::select(x, y)
+df_vars <- df_trans %>% dplyr::select(!any_of(c(id_cols, "x", "y")))
+# std
+preproc <- caret::preProcess(df_vars)
+X_std <- predict(preproc, df_vars)
+```
+
+Al revisar la distribución expresada en términos de desviaciones estándar podemos apreciar claramente valores más de 4 desviaciones estandar del promedio:
+
+```{r}
+my_summarise(X_std, colnames(X_std)) %>% print(n=nrow(.))
+```
+
+Estos pueden ser descartados para evitar afectar la estructura de relación entre las variables:
+
+```{r}
+# descartar outliers
+out_rows <- (apply(X_std, 1, function(x) any(abs(x)>4)))
+X <- X_std %>% filter(!out_rows)
+coords <- df_coords %>% filter(!out_rows)
+```
+
+
+
+### Análisis de Correlación
+
+A partir de esto podemos revisar las asociaciones entre los indicadores trabajados:
+
+```{r}
+corr <- cor(X)
+```
+
+
+```{r, fig.align='center', fig.width=8}
+# improved correlation matrix
+library(corrplot)
+corrplot(corr,
+  method = "square",
+  # type = "upper", # show only upper side
+  tl.cex	=0.9,
+  number.cex =0.4,
+  tl.col = "gray50"
+)
+```
+
+
+Se aprecian grupos de indicadores positivamente relacionados como las caracterizaciones de personas y hogares, asi tambien indicadores como dim_acc iser, iav, iata e isal. Las asociaones dnegativas ocurren principalmente entre indicadores de seguridad y los indicadores de accesibilidad.
+
+
+
+
+### Feature Extraction
+
+En esta sección reducimos la dimensionalidad del espacio de features para facilitar la detección de clusters, con el objetivo general de reducir tiempo procesamiento y memoria;facilitar la visualización y eliminar atributos irrelevantes eliminando ruido.
+
+Usaremos distintas técnicas las cuales serán comparadas en su capacidad de generar una proyección de los datos donde se detecten más fácilmente clusters.
+
+#### PCA
+Comenzamos por análisis de componentes principales:
+
+```{r}
+# pca
+PCA <- princomp(X, cor=TRUE)
+features_pca <- 
+  predict(PCA) %>% 
+  as_tibble() %>% 
+  janitor::clean_names() %>% 
+  dplyr::select(1:2)
+```
+
+Al revisar la varianza explicada por cada combinación lineal de variables tenemos que con los tres primeros componentes no alcanzamos a expresar el 40% de la varianza.
+
+```{r}
+barplot(cumsum(PCA$sdev/sum(PCA$sdev)))
+```
+
+#### UMAP
+
+Luego aplicamos UMAP:
+
+```{r}
+data.umap <- umap(X)
+features_umap <- data.umap$layout %>% as.data.frame()
+```
+
+#### Escalamiento muldimensional
+
+```{r}
+# Multidimensional scaling 
+d <- dist(X) # distancias euclidianas entre entidades
+data.MDS <- cmdscale(d, eig=TRUE, k = 2) # k es el numero de dimensiones de salida
+
+features_MDS <- 
+  data.MDS$points %>% 
+  as.data.frame() %>% 
+  as_tibble()
+```
+
+#### Escalamiento multidimensional no paramétrico:
+
+```{r}
+# nonparametric MDS
+data.nMDS <- isoMDS(d, k=2) 
+
+features_nMDS <- 
+  data.nMDS$points %>% 
+  as.data.frame() %>% 
+  as_tibble()
+
+```
+
+#### Comparación
+
+Comparamos sus resultados en su capacidad de generar clusters mediante el estadístico de Hopkins, donde se necesita probar la hipótesis de la existencia de patrones en los datos contra un conjunto de datos distribuidos uniformemente (distribución homogénea). A continuación se visualiza su evaluación:
+
+```{r}
+h_umap <- get_clust_tendency(features_umap, n = 30, graph = FALSE)$hopkins_stat
+h_mds <- get_clust_tendency(features_MDS, n = 30, graph = FALSE)$hopkins_stat
+h_nmds <- get_clust_tendency(features_nMDS, n = 30, graph = FALSE)$hopkins_stat
+h_pca <-get_clust_tendency(features_pca, n = 30, graph = FALSE)$hopkins_stat
+list(h_umap = h_umap, h_mds = h_mds, h_nmds = h_nmds, h_pca = h_pca)
+```
+
+Se precia como UMAP genera la mejor extracción de features para identificar clusters en el espacio de variables. Se puede apreciar gráficamente:
+
+```{r}
+ggplot(features_umap, aes(V1, V2)) + 
+  geom_point()
+
+```
+
+
+<!-- ![](img/umap_hopkins.png) -->
+
+
+
+
+
+
+
+## Problema 1: Cluster en espacio de variables
+
+Enunciado:
+: Aplique un algoritmo de clustering y seleccione 13 clusters sin considerar las variables de posición de las manzanas. Muestre el resultado del proceso de clustering (grafique los puntos del espacio con sus respectivas etiquetas de clusters), y vea cuales son sus ventajas y desventajas para la creación de las manzanas.
+
+
+Usando la proyección de datos generada por UMAP identificaremos clusters en el espacio de variables y revisamos su expresión espacial.
+
+
+
+Comenzamos por Cluster Jerárquico y K-medias, para ambos calculamos primeramente la distancia eucledian
+
+```{r}
+# calculamos la distancia euclideana
+d0 <- dist(features_umap)
+```
+
+**Cluster Jerárquico:**
+
+```{r}
+# hacemos un modelo jerarquico con distancia completa
+model_complete <- hclust(d0)
+# obtenemos una sintesis del modelo
+hgroups <- cutree(model_complete, k = 13)
+
+```
+
+
+**kmeans**
+
+```{r}
+# kmeans
+kmod <- kmeans(features_umap, 13)
+kgroups <- kmod$cluster
+```
+
+
+```{r echo=FALSE}
+#| layout-ncol: 2
+#| fig-cap: 
+#|   - "Cluster Jerárquico"
+#|   - "Kmeans"
+ggplot(df_coords %>% filter(!out_rows)) +
+  geom_hex(aes(x = x,y = y, fill=factor(hgroups) ), alpha  = 0.5) +
+  geom_point(aes(x = x,y = y, col=factor(hgroups))) +
+      scale_color_discrete(paletteer_c("grDevices::rainbow", 13))+
+  scale_fill_discrete(paletteer_c("grDevices::rainbow", 13))+
+  labs(title="Hierarchical Cluster Features Space",subtitle = "Geography Results" )+
+  theme(legend.position = "none")
+
+
+ggplot(df_coords %>% filter(!out_rows)) +
+  geom_hex(aes(x = x,y = y, fill=factor(kgroups) ), alpha  = 0.5) +
+  geom_point(aes(x = x,y = y,  col=factor(kgroups))) +
+      scale_color_discrete(paletteer_c("grDevices::rainbow", 13))+
+  scale_fill_discrete(paletteer_c("grDevices::rainbow", 13))+
+  labs(title="K-Means Cluster Features Space",subtitle = "Geography Results" )+
+  theme(legend.position = "none")
+```
+
+
+
+
+### Discusión y Evaluación
+
+Se aprecia como las formas se sobrelapan en ambos métodos en la mayoria de asignación de, siendo sin embargo el cluster jerárquico más limpio en los grupos identificados de acuerdo a una inspección visual.
+
+```{r echo=FALSE}
+# trasformación de dataframe a Simple Feature (objeto espacial en R)
+sf_clusters <- df_coords %>% filter(!out_rows) %>% 
+  st_as_sf(coords = c("x", "y"), crs = 32719) %>% 
+  mutate(kgroups = factor(kgroups),
+         hgroups = factor(hgroups))
+# pal <- magma(n = length(unique(sf_clusters$hgroups)), direction = -1)
+mapview(sf_clusters, zcol="hgroups", cex = 3, 
+        col.regions=paletteer_c("grDevices::rainbow", 13),
+            layer.name  = "C. Jerárquico")
+```
+
+
+## Problema 2: Cluster en espacio geográfico
+
+Enunciado:
+: Aplique un algoritmo de clustering y seleccione 13 clusters considerando solo las variables de posición de las manzanas. Muestre el resultado del proceso de clustering (grafique los puntos del espacio con sus respectivas etiquetas de clusters), y vea cuales son sus ventajas y desventajas para la creación de las manzanas.
+
+
+Ahora repetimos el ejercicio solo usando el espacio geográfico de las manzanas, usaremos tanto Cluster Jerárquico como K-medias y los comparemos.
+
+Primeramente se calcula la distancias eclediana por corrdenadas, esto nos da una relación de proximidad real
+
+```{r}
+d1 <- dist(coords)
+```
+
+**Cluster Jerárquico:**
+
+```{r}
+hgeo <- hclust(d1)
+hgeo_groups <- cutree(hgeo, k = 13)
+```
+
+**kmeans**
+```{r}
+kgeo <- kmeans(coords, 13)
+kgeo_groups <- kgeo$cluster
+```
+
+Gráficamente tenemos:
+
+
+```{r echo=FALSE}
+#| layout-ncol: 2
+#| fig-cap: 
+#|   - "C. Jerárquico - Espacio Geográfico"
+#|   - "K-means - Espacio Geográfico"
+ggplot(df_coords %>% filter(!out_rows)) +
+  geom_hex(aes(x = x,y = y, fill=factor(hgeo_groups), ), alpha  = 0.5) +
+  geom_point(aes(x = x,y = y, col=factor(hgeo_groups))) +
+    scale_color_discrete(paletteer_c("grDevices::rainbow", 13))+
+  scale_fill_discrete(paletteer_c("grDevices::rainbow", 13))+
+  labs(title="Hierarchical Cluster Geography Space",subtitle = "Geography Results" )+
+  theme(legend.position = "none")
+
+
+ggplot(df_coords %>% filter(!out_rows)) +
+  geom_hex(aes(x = x,y = y, fill=factor(kgeo_groups), ), alpha  = 0.5) +
+  geom_point(aes(x = x,y = y,  col=factor(kgeo_groups))) +
+    scale_color_discrete(paletteer_c("grDevices::rainbow", 13))+
+  scale_fill_discrete(paletteer_c("grDevices::rainbow", 13))+
+  labs(title="K-Means Cluster Geography Space",subtitle = "Geography Results" )+
+  theme(legend.position = "none")
+```
+
+
+
+
+
+### Discusión y Evaluación
+
+Se aprecian clusters más claros espacialmente, además de la diferencia entre grupos encontrados en ambos métodos. Nuevamente a través del proceso de inspección visual encontramos que existen patrones concentración espacial con mayor definicón en cluster jerárquico denominado `hgeo_groups`. 
+
+
+```{r=FALSE}
+
+# trasformación de dataframe a Simple Feature (objeto espacial en R)
+sf_clusters <- df_coords %>% filter(!out_rows) %>% 
+  st_as_sf(coords = c("x", "y"), crs = 32719) %>% 
+  mutate(kgeo_groups = factor(kgeo_groups),
+         hgeo_groups = factor(hgeo_groups))
+mapview(sf_clusters, zcol="hgeo_groups", cex = 3,
+        col.regions=paletteer_c("grDevices::rainbow", 13),
+          layer.name  = "hgeo_groups"
+        )
+```
+
+
+
+## Problema 3: Cluster en espacio de variables y geográfico
+
+Enunciado:
+: Aplique un algoritmo de clustering y seleccione 13 clusters considerando las variables descriptivas y las variables de posición. Sin embargo, para este problema, se le pide que pueda integrar la distancia entre las manzanas como algo restrictivo. Específicamente, que la distancia entre dos puntos que pertenecen a un mismo cluster no sea mayor a 2,000 metros (en la medida de lo posible). Muestre el resultado del proceso de clustering (grafique los puntos del espacio con sus respectivas etiquetas de clusters), y vea cuales son sus ventajas y desventajas para la creación de las manzanas.
+
+Finalmente usaremos un método de cluster jerárquico geográfico implementado por la librería ``ClustGeo`` el cual usa dos matrices de distancias, una en el espacio de variables y otra en el espacio geográfico. Estas son combinadas de forma convexa y usando el parámetro ``alpha`` que le da la importancia relativa a cada una de las distancias. Cuando este es 0 la distancia geográfica no tiene imporancia y cuando es 1 tiene toda la importancia.
+
+Para elegir el valor de este parámetro alpha se calculan las homogeneidades relativas en cada matriz de distancia en los grupos encontrados, la idea es elegir un valor que no implique un sacrificio importante en ambos frentes.
+
+Comenzamos por implementar el método usando las distancias geográficas crudas y luego lo implementamos usando una restricción de vecindad de menos de 2000 metros:
+
+```{r}
+library(ClustGeo)
+
+range.alpha <- seq(0,1,0.1)
+K <- 13
+cr <- choicealpha(d0, d1, range.alpha, 
+                  K, graph = FALSE)
+cr$Q # proportion of explained inertia
+plot(cr)
+```
+
+A partir de esto se define un alpha de 0.9 que le da mayor relevancia al espacio geográfico y no implica una pérdida importante en el espacio de variables:
+
+```{r}
+# alpha que compensa perdida en homogeneidad en features (D0)
+# con ganancia en homogeneidad espacial (D1)
+alpha_geo = 0.9
+tree <- hclustgeo(d0,d1,alpha = alpha_geo)
+geoclust <- cutree(tree,13)
+```
+
+Para el caso de restricción de vecindad repetimos el proceso:
+
+```{r}
+library(sf)
+library(spdep)
+
+pts <- st_as_sf(coords, coords = c("x","y"), crs = 3857)
+nb <- dnearneigh(pts, d1 = 0, d2 = 2000)
+A <- nb2mat(nb,style="B")
+diag(A) <- 1
+
+D1 <- as.dist(1-A)
+
+range.alpha <- seq(0,1,0.1)
+K <- 13
+cr <- choicealpha(d0, D1, range.alpha,
+                  K, graph=FALSE)
+plot(cr) # alpha buen compromiso0.5
+
+```
+
+Se escoge un valor de 0.5 que no genera mayor pérdida en ambos espacios.
+
+```{r}
+alpha_nb = 0.5
+tree_nb <- hclustgeo(d0,D1,alpha = alpha_nb)
+geoclust_nb <- cutree(tree_nb,13)
+```
+
+
+Los resultados se presentan a continuación:
+
+
+```{r echo=FALSE}
+#| layout-ncol: 2
+#| fig-cap: 
+#|   - "C. Jerárquico - Espacio Geográfico"
+#|   - "K-means - Espacio Geográfico"
+ggplot(df_coords %>% filter(!out_rows)) +
+  geom_hex(aes(x = x,y = y, fill=factor(geoclust), ), alpha  = 0.5) +
+  geom_point(aes(x = x,y = y, col=factor(geoclust))) +
+    scale_color_discrete(paletteer_c("grDevices::rainbow", 13))+
+  scale_fill_discrete(paletteer_c("grDevices::rainbow", 13))+
+  labs(title="Cluster Regional",
+       subtitle = "Restricción Distancia en Metros" )+
+  theme(legend.position = "none")
+
+
+ggplot(df_coords %>% filter(!out_rows)) +
+  geom_hex(aes(x = x,y = y, fill=factor(geoclust_nb), ), alpha  = 0.5) +
+  geom_point(aes(x = x,y = y,  col=factor(geoclust_nb))) +
+  scale_color_discrete(paletteer_c("grDevices::rainbow", 13))+
+  scale_fill_discrete(paletteer_c("grDevices::rainbow", 13))+
+  labs(title="Cluster Regional",
+       subtitle = "Restricción Vecindad < 2000 metros" )+
+  theme(legend.position = "none")
+```
+
+
+
+
+
+### Discusión y Evaluación
+
+En este caso a través de un proceso de inspección visual de resultados espacializados, encontramos que cluster denominado `geoclust` que utiliza las distancias crudas, con un factor de relevancia de ellas de 0.9 tiene resultados más consistentes o definición de los patrones de concentración, que el método que utiliza una restricción de distancia (2000 metros). A continuación se visualiza el cluster elegido.
+
+```{r echo=FALSE}
+# trasformación de dataframe a Simple Feature (objeto espacial en R)
+sf_clusters <- df_coords %>% filter(!out_rows) %>% 
+  st_as_sf(coords = c("x", "y"), crs = 32719) %>% 
+  mutate(geoclust = factor(geoclust),
+         geoclust_nb = factor(geoclust_nb))
+mapview(sf_clusters, zcol="geoclust", cex = 3, 
+        col.regions=paletteer_c("grDevices::rainbow", 13),
+          layer.name  = "geoclust")
+```
+
