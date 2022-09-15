@@ -1,0 +1,49 @@
+body {
+  text-align: justify;
+}
+
+p.caption {
+  color: #777;
+  margin-top: 10px;
+}
+p {
+  font-size: 16px
+}
+p code {
+  white-space: inherit;
+}
+pre {
+  word-break: normal;
+  word-wrap: normal;
+}
+pre code {
+  white-space: inherit;
+  font-size: 14px
+}
+
+ul, li{
+  font-size: 15px
+}
+
+
+h1{
+  font-size: 28px
+}
+
+h2{
+  font-size: 25px
+}
+
+h3{
+  font-size: 22px
+}
+h4{
+  font-size: 18px
+}
+.nav-link{
+   font-size: 14px
+}
+
+.figure-caption{
+  font-size: 14px;
+}
